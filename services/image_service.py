@@ -1,7 +1,7 @@
 """Supabase Storage image storage.
 
 Production uses Supabase Storage exclusively. Images are uploaded with the
-backend service-role credentials and served from a public bucket URL. There is
+backend service-role credentials into the configured public bucket. There is
 no local filesystem fallback and no unauthenticated /uploads route.
 
 The service-role key lives only on the backend; it is never returned to
@@ -63,26 +63,77 @@ def validate_image(content_type: str, data: bytes) -> str:
     return ext
 
 
-def store_image(user_id: str, data: bytes, extension: str) -> str:
-    """Upload the image to Supabase Storage and return a public URL."""
+def _storage_headers() -> dict:
     if not (SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY):
         raise ImageValidationError("Supabase Storage is not configured.", "STORAGE_ERROR")
-    filename = f"{secrets.token_hex(16)}{extension}"
-    path = f"{user_id}/{filename}"
-    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{path}"
-    headers = {
+    return {
         "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
         "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Content-Type": MIME_BY_EXTENSION[extension],
     }
+
+
+def store_image(user_id: str, data: bytes, extension: str) -> str:
+    """Upload an image under a random path and return that internal path."""
+    filename = f"{secrets.token_hex(16)}{extension}"
+    path = f"{user_id}/{filename}"
+    return store_image_at_path(user_id, data, extension, path)
+
+
+def store_image_at_path(user_id: str, data: bytes, extension: str, storage_path: str) -> str:
+    """Upload the image to Supabase Storage and return its internal path.
+
+    Using a deterministic path (e.g. inspections/{inspection_id}/{side}.jpg)
+    means uploading the same side again overwrites the previous file in Storage,
+    consistent with the upsert behaviour in the database.
+    """
+    headers = _storage_headers()
+    mime = MIME_BY_EXTENSION.get(extension, "application/octet-stream")
+    headers["Content-Type"] = mime
+
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{storage_path}"
     try:
-        resp = httpx.post(url, content=data, headers=headers, timeout=30)
+        resp = httpx.put(url, content=data, headers=headers, timeout=30)
     except httpx.HTTPError as exc:
         raise ImageValidationError(
             "Failed to upload image to Supabase Storage.", "STORAGE_ERROR"
         ) from exc
+
     if resp.status_code not in (200, 201):
+        # If bucket doesn't exist (404/400), give a clear error.
+        if resp.status_code in (400, 404):
+            raise ImageValidationError(
+                f"Supabase Storage bucket '{SUPABASE_STORAGE_BUCKET}' does not exist or is "
+                "inaccessible. Create the bucket in the Supabase dashboard before uploading.",
+                "STORAGE_BUCKET_MISSING",
+            )
         raise ImageValidationError(
-            "Failed to upload image to Supabase Storage.", "STORAGE_ERROR"
+            f"Failed to upload image to Supabase Storage (HTTP {resp.status_code}).",
+            "STORAGE_ERROR",
         )
-    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_STORAGE_BUCKET}/{path}"
+
+    return storage_path
+
+
+def public_url(storage_path: str) -> str:
+    """Return the public URL for an object in the configured public bucket."""
+    if not SUPABASE_URL:
+        raise ImageValidationError("Supabase Storage is not configured.", "STORAGE_ERROR")
+    return f"{SUPABASE_URL}/storage/v1/object/public/{SUPABASE_STORAGE_BUCKET}/{storage_path}"
+
+
+def download_image(storage_path: str) -> bytes:
+    """Download image bytes from Supabase Storage (for ML pipeline)."""
+    headers = _storage_headers()
+    url = f"{SUPABASE_URL}/storage/v1/object/{SUPABASE_STORAGE_BUCKET}/{storage_path}"
+    try:
+        resp = httpx.get(url, headers=headers, timeout=30)
+    except httpx.HTTPError as exc:
+        raise ImageValidationError(
+            "Failed to download image from Supabase Storage.", "STORAGE_ERROR"
+        ) from exc
+    if resp.status_code != 200:
+        raise ImageValidationError(
+            f"Failed to download image from Supabase Storage (HTTP {resp.status_code}).",
+            "STORAGE_ERROR",
+        )
+    return resp.content

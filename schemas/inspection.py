@@ -1,12 +1,14 @@
 from datetime import date, datetime, time
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
 
 class InspectionCreate(BaseModel):
-    product_name: str = Field(min_length=1, max_length=255)
+    product_name: Optional[str] = Field(None, min_length=1, max_length=255)
     product_category: Optional[str] = Field(None, max_length=100)
+    product_type: Optional[str] = Field(None, max_length=64)
+    side_count: Literal[2, 4]
 
 
 class InspectionOut(BaseModel):
@@ -15,6 +17,8 @@ class InspectionOut(BaseModel):
     product_name: Optional[str]
     product_category: Optional[str]
     product_image_url: Optional[str]
+    product_type: Optional[str]
+    side_count: Optional[int]
     inspection_date: Optional[date]
     # The model stores SQLAlchemy Time; typed as `time` so Pydantic serializes
     # it as "HH:MM:SS" instead of failing on a str-typed field.
@@ -23,6 +27,19 @@ class InspectionOut(BaseModel):
     compliance_score: Optional[float]
     created_at: Optional[datetime]
     updated_at: Optional[datetime]
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class InspectionImageOut(BaseModel):
+    id: str
+    inspection_id: str
+    side: str
+    side_order: int
+    public_url: Optional[str]
+    mime_type: Optional[str]
+    file_size: Optional[int]
+    created_at: Optional[datetime]
 
     model_config = ConfigDict(from_attributes=True)
 

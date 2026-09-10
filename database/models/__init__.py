@@ -12,6 +12,7 @@ from database.models.complaint import Complaint, COMPLAINT_STATUSES
 from database.models.compliance_result import ComplianceResult
 from database.models.extracted_information import ExtractedInformation
 from database.models.inspection import Inspection, INSPECTION_STATUSES
+from database.models.inspection_image import InspectionImage, VALID_SIDES
 from database.models.profile import Profile
 
 __all__ = [
@@ -21,5 +22,7 @@ __all__ = [
     "ExtractedInformation",
     "Inspection",
     "INSPECTION_STATUSES",
+    "InspectionImage",
+    "VALID_SIDES",
     "Profile",
 ]

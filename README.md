@@ -103,10 +103,10 @@ tokens. No local-upload variables are used in production.
    `compliance_results`, and `complaints`, with foreign keys to
    `auth.users.id` and to `inspections.id`. `auth.users` itself is managed by
    Supabase; the migration only references it.
-3. **Storage:** create a bucket named `product-images` (or set
-   `SUPABASE_STORAGE_BUCKET`), **public-read** so Flutter can display the
-   returned image URLs directly. Files are uploaded by the backend with the
-   service-role key under `<user_id>/<random>.png|jpg|webp`.
+3. **Storage:** use the existing **public** bucket named `product-images` (or
+   set `SUPABASE_STORAGE_BUCKET`). Files are uploaded only by the backend with
+   the service-role key. The API returns each object's public Storage URL;
+   Flutter never receives backend credentials.
 
 > The service-role key must never be embedded in or returned to the Flutter
 > app. All Supabase calls that need elevated access happen server-side.

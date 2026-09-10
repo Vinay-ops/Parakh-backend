@@ -1,24 +1,24 @@
 """ML integration interface — PLACEHOLDER ONLY.
 
-The ML team owns the implementation of this module. The contract is:
+The ML team owns the implementation of this module. The contracts are:
 
-    process_image(image_path: str) -> dict
+    process_inspection(inspection_id: str, side_images: list[tuple[str, str]]) -> dict
 
-It receives a local filesystem path to the stored product image and MUST
-return a dict matching ML_RESULT_SCHEMA below (see docs/ML_INTEGRATION.md for
-the full specification and examples).
+    process_image(image_path: str) -> dict  (legacy single-image interface)
 
-When implementing, keep the signature and return shape unchanged so that
-neither the Flutter API contract nor the database schema needs to change.
-Until then, process_image raises NotImplementedError and /api/scan records the
-inspection with compliance_status = "PENDING_ML". No fake predictions exist
-anywhere in this codebase.
+`process_inspection` receives:
+  - inspection_id: the public INSP-... identifier (for logging/correlation)
+  - side_images: list of (side_label, local_file_path) tuples, e.g.
+      [("front", "/tmp/parakh_abc_front.jpg"), ("back", "/tmp/parakh_abc_back.jpg")]
+
+It MUST return a dict matching ML_RESULT_SCHEMA below.
+
+Until implemented, both functions raise MLNotIntegratedError and /api/inspections/{id}/process
+records the inspection as PENDING_ML. No fake predictions exist anywhere.
 """
 from typing import Any, Optional
 
-# The exact structure the ML team must return. `validate_result` normalizes it
-# and `inspection_service.apply_ml_result` persists exactly this shape, so the
-# schema and the persistence layer always agree.
+# The exact structure the ML team must return.
 ML_RESULT_SCHEMA: dict = {
     "product_information": {
         "common_product_name": Optional[str],
@@ -54,13 +54,35 @@ class MLNotIntegratedError(NotImplementedError):
     """Raised while the ML model has not been integrated yet."""
 
 
-def process_image(image_path: str) -> dict:
-    """Run OCR / product extraction / compliance analysis on a product image.
+def process_inspection(inspection_id: str, side_images: list[tuple[str, str]]) -> dict:
+    """Run OCR / product extraction / compliance analysis on multi-side package images.
 
-    TODO(ML team): implement this function. Do not change the signature or the
-    return structure (ML_RESULT_SCHEMA). The backend persists the returned
-    product_information into `extracted_information` and each compliance rule
-    into `compliance_results`, so the Flutter app needs no changes.
+    Args:
+        inspection_id: Public INSP-... identifier for logging/correlation.
+        side_images: List of (side_label, local_file_path) tuples ordered by
+                     side_order. Example:
+                       [("front", "/tmp/parakh_abc_front.jpg"),
+                        ("back",  "/tmp/parakh_abc_back.jpg"),
+                        ("left",  "/tmp/parakh_abc_left.jpg"),
+                        ("right", "/tmp/parakh_abc_right.jpg")]
+
+    Returns:
+        dict matching ML_RESULT_SCHEMA. The ML team aggregates information from
+        all sides into a single product_information dict and a single compliance
+        result. Side-specific bounding boxes can be included in compliance rules.
+
+    TODO(ML team): implement this function. Keep the signature and return
+    structure from this docstring. Do not change ML_RESULT_SCHEMA.
+    """
+    raise MLNotIntegratedError("ML model is not integrated yet")
+
+
+def process_image(image_path: str) -> dict:
+    """Legacy single-image interface — kept for backward compatibility.
+
+    New code should call process_inspection() with side_images.
+
+    TODO(ML team): implement or delegate to process_inspection.
     """
     raise MLNotIntegratedError("ML model is not integrated yet")
 
@@ -69,9 +91,7 @@ def validate_result(result: Any) -> dict:
     """Normalize and structurally validate raw ML output.
 
     The ML team can rely on this: anything missing/None is stored as NULL and
-    an empty rules list simply means no per-rule results were produced. The
-    returned dict always has the canonical shape:
-        {"product_information": {...}, "compliance": {"status", "score", "rules"}}
+    an empty rules list simply means no per-rule results were produced.
     """
     if not isinstance(result, dict):
         raise ValueError("ML result must be a dict")

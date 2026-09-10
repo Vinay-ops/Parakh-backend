@@ -48,11 +48,15 @@ async def scan(
     except image_service.ImageValidationError as exc:
         error(str(exc), exc.error_code, 400)
 
-    image_url = image_service.store_image(user_id, bytes(data), extension)
+    storage_path = image_service.store_image(user_id, bytes(data), extension)
+    image_url = image_service.public_url(storage_path)
 
     inspection = inspection_service.create_inspection_for_scan(
         db, user_id, product_name, product_category, image_url
     )
+    inspection.compliance_status = "PENDING_ML"
+    db.commit()
+    db.refresh(inspection)
 
     # --- ML pipeline boundary: everything below is the ML team's slot. ---
     # The stored image is materialised to a local path for the ML pipeline.
@@ -63,7 +67,7 @@ async def scan(
     local_path = Path(tempfile.gettempdir()) / f"parakh_{inspection.id}{extension}"
     local_path.write_bytes(data)
     try:
-        raw_result = ml_service.process_image(str(local_path))
+        raw_result = ml_service.process_inspection(inspection.inspection_id, [("front", str(local_path))])
         ml_result = ml_service.validate_result(raw_result)
         inspection = inspection_service.apply_ml_result(db, inspection, ml_result)
         ml_pending = False

@@ -89,14 +89,19 @@ def client(tmp_path, monkeypatch):
         raise auth_service.InvalidCredentialsError("Invalid or expired token")
 
     def fake_store_image(user_id, data, extension):
-        return (
-            f"https://test.supabase.co/storage/v1/object/public/"
-            f"product-images/{user_id}/img{extension}"
-        )
+        return f"inspections/{user_id}/img{extension}"
+
+    def fake_store_image_at_path(user_id, data, extension, storage_path):
+        return storage_path
+
+    def fake_download_image(storage_path):
+        return PNG_BYTES
 
     monkeypatch.setattr(auth_service, "sign_in_with_password", fake_sign_in)
     monkeypatch.setattr(auth_service, "get_user_from_token", fake_get_user)
     monkeypatch.setattr(image_service, "store_image", fake_store_image)
+    monkeypatch.setattr(image_service, "store_image_at_path", fake_store_image_at_path)
+    monkeypatch.setattr(image_service, "download_image", fake_download_image)
 
     with TestClient(app_module.app) as c:
         yield c, users
@@ -234,7 +239,7 @@ def test_scan_creates_pending_ml_inspection(client):
     assert data["status"] == "PENDING_ML"
     assert data["ml_pending"] is True
     assert data["inspection_id"].startswith("INSP-")
-    assert data["image_url"].startswith("https://test.supabase.co/storage/")
+    assert data["image_url"].startswith("https://test.supabase.co/storage/v1/object/public/")
 
     listed = c.get("/api/inspections", headers=headers).json()["data"]
     assert any(i["inspection_id"] == data["inspection_id"] for i in listed["items"])
@@ -275,7 +280,7 @@ def test_inspection_flow(client):
 
     created = c.post(
         "/api/inspections",
-        json={"product_name": "Juice", "product_category": "Beverage"},
+        json={"product_name": "Juice", "product_category": "Beverage", "side_count": 2},
         headers=headers,
     )
     assert created.status_code == 200
@@ -316,6 +321,52 @@ def test_create_inspection_requires_product_name(client):
     assert resp.status_code == 422
     assert resp.json()["success"] is False
     assert resp.json()["error_code"] == "VALIDATION_ERROR"
+
+
+def test_multi_side_inspection_requires_exact_capture_set(client):
+    c, users = client
+    _create_user(users, "a@x.com")
+    headers = _login(c, "a@x.com")
+    created = c.post(
+        "/api/inspections",
+        json={"product_type": "carton", "side_count": 2},
+        headers=headers,
+    )
+    inspection_id = created.json()["data"]["inspection_id"]
+
+    invalid_side = c.post(
+        f"/api/inspections/{inspection_id}/images",
+        files={"image": ("left.png", io.BytesIO(PNG_BYTES), "image/png")},
+        data={"side": "left"},
+        headers=headers,
+    )
+    assert invalid_side.status_code == 422
+    assert invalid_side.json()["error_code"] == "INVALID_SIDE"
+
+    front = c.post(
+        f"/api/inspections/{inspection_id}/images",
+        files={"image": ("front.png", io.BytesIO(PNG_BYTES), "image/png")},
+        data={"side": "front"},
+        headers=headers,
+    )
+    assert front.status_code == 200
+    assert "/object/public/" in front.json()["data"]["public_url"]
+
+    incomplete = c.post(f"/api/inspections/{inspection_id}/process", headers=headers)
+    assert incomplete.status_code == 422
+    assert incomplete.json()["error_code"] == "INCOMPLETE_CAPTURE"
+
+    back = c.post(
+        f"/api/inspections/{inspection_id}/images",
+        files={"image": ("back.png", io.BytesIO(PNG_BYTES), "image/png")},
+        data={"side": "back"},
+        headers=headers,
+    )
+    assert back.status_code == 200
+
+    process = c.post(f"/api/inspections/{inspection_id}/process", headers=headers)
+    assert process.status_code == 200
+    assert process.json()["data"]["status"] == "PENDING_ML"
 
 
 # -------------------------------------------------------------- complaints ---
@@ -366,7 +417,7 @@ def test_complaint_inspection_id_is_public(client):
 
     # Create an inspection; get its public id.
     insp = c.post(
-        "/api/inspections", json={"product_name": "Biscuit"}, headers=headers
+        "/api/inspections", json={"product_name": "Biscuit", "side_count": 2}, headers=headers
     ).json()["data"]
     public_insp_id = insp["inspection_id"]
     assert public_insp_id.startswith("INSP-")
@@ -407,7 +458,7 @@ def test_complaint_references_owned_inspection(client):
     _create_user(users, "b@x.com")
     ha, hb = _login(c, "a@x.com"), _login(c, "b@x.com")
 
-    insp = c.post("/api/inspections", json={"product_name": "X"}, headers=ha).json()["data"]
+    insp = c.post("/api/inspections", json={"product_name": "X", "side_count": 2}, headers=ha).json()["data"]
     public_insp_id = insp["inspection_id"]
 
     # Same user: allowed; response inspection_id must be the public INSP-... id.
@@ -510,7 +561,7 @@ def test_user_isolation(client):
     ha, hb = _login(c, "a@x.com"), _login(c, "b@x.com")
 
     scan_a = _scan(c, ha).json()["data"]
-    insp_a = c.post("/api/inspections", json={"product_name": "A product"}, headers=ha).json()["data"]
+    insp_a = c.post("/api/inspections", json={"product_name": "A product", "side_count": 2}, headers=ha).json()["data"]
     comp_a = c.post("/api/complaints", json={"complaint_title": "A complaint"}, headers=ha).json()["data"]
 
     # User B sees none of user A's data.

@@ -1,10 +1,8 @@
 """Inspection persistence and ML-result persistence.
 
-The only place inspection records are created is `create_inspection_for_scan`,
-called by POST /api/scan. ML results are persisted through
-`apply_ml_result`, which the ML integration will invoke (synchronously from
-within the scan flow, or later from a worker) — it never changes the Flutter
-API contract.
+The only place inspection records are created is `create_inspection_record`,
+called by POST /api/inspections and (legacy) POST /api/scan.
+ML results are persisted through `apply_ml_result`.
 """
 from datetime import datetime
 
@@ -12,11 +10,18 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database.models import ComplianceResult, ExtractedInformation, Inspection
+from database.models.inspection_image import InspectionImage
 from utils.helpers import now_utc, public_id
 
 
-def create_inspection_for_scan(
-    db: Session, user_id: str, product_name: str | None, product_category: str | None, image_url: str
+def create_inspection_record(
+    db: Session,
+    user_id: str,
+    product_name: str | None,
+    product_category: str | None,
+    image_url: str | None = None,
+    product_type: str | None = None,
+    side_count: int | None = None,
 ) -> Inspection:
     now = now_utc()
     inspection = Inspection(
@@ -25,14 +30,84 @@ def create_inspection_for_scan(
         product_name=product_name,
         product_category=product_category,
         product_image_url=image_url,
+        product_type=product_type,
+        side_count=side_count,
         inspection_date=now.date(),
         inspection_time=now.time().replace(microsecond=0),
-        compliance_status="PENDING_ML",
+        compliance_status="CREATED",
     )
     db.add(inspection)
     db.commit()
     db.refresh(inspection)
     return inspection
+
+
+# Backward-compat alias used by legacy POST /api/scan endpoint.
+def create_inspection_for_scan(
+    db: Session,
+    user_id: str,
+    product_name: str | None,
+    product_category: str | None,
+    image_url: str | None,
+) -> Inspection:
+    return create_inspection_record(db, user_id, product_name, product_category, image_url)
+
+
+def upsert_inspection_image(
+    db: Session,
+    inspection_id: str,
+    side: str,
+    side_order: int,
+    storage_path: str,
+    public_url: str | None,
+    mime_type: str | None,
+    file_size: int | None,
+) -> InspectionImage:
+    """Create or replace the image record for a specific side of an inspection.
+
+    UNIQUE(inspection_id, side) is enforced at the DB level. Here we do an
+    application-level upsert: if a record exists, update it; otherwise insert.
+    This means retaking a side correctly replaces the previous image.
+    """
+    existing = (
+        db.query(InspectionImage)
+        .filter(
+            InspectionImage.inspection_id == inspection_id,
+            InspectionImage.side == side,
+        )
+        .first()
+    )
+    if existing:
+        existing.storage_path = storage_path
+        existing.public_url = public_url
+        existing.mime_type = mime_type
+        existing.file_size = file_size
+        db.commit()
+        db.refresh(existing)
+        return existing
+
+    img = InspectionImage(
+        inspection_id=inspection_id,
+        side=side,
+        side_order=side_order,
+        storage_path=storage_path,
+        public_url=public_url,
+        mime_type=mime_type,
+        file_size=file_size,
+    )
+    db.add(img)
+    db.commit()
+    db.refresh(img)
+    return img
+
+
+def get_inspection_images(db: Session, inspection_id: str) -> list[InspectionImage]:
+    return (
+        db.query(InspectionImage)
+        .filter(InspectionImage.inspection_id == inspection_id)
+        .order_by(InspectionImage.side_order.asc())
+        .all()
+    )
 
 
 def get_by_public_id(db: Session, user_id: str, inspection_id: str) -> Inspection | None:
@@ -103,9 +178,7 @@ def apply_ml_result(db: Session, inspection: Inspection, ml_result: dict) -> Ins
 
     Called once the ML model is integrated. Creates/replaces the
     extracted_information row, replaces compliance_results rows, and updates
-    the inspection's compliance status and score. The canonical result shape
-    is {"product_information": {...}, "compliance": {"status", "score", "rules"}}
-    (see docs/ML_INTEGRATION.md).
+    the inspection's compliance status and score.
     """
     product_information = ml_result["product_information"]
     compliance = ml_result["compliance"]
