@@ -27,7 +27,9 @@ def upgrade() -> None:
     op.create_table(
         "inspection_images",
         sa.Column("id", sa.Text(), nullable=False),
-        sa.Column("inspection_id", sa.Text(), nullable=False),
+        # inspections.id is UUID in the initial schema; keep the foreign key
+        # type aligned so PostgreSQL can create the constraint.
+        sa.Column("inspection_id", sa.Uuid(), nullable=False),
         sa.Column("side", sa.String(length=16), nullable=False),
         sa.Column("side_order", sa.Integer(), nullable=False),
         sa.Column("storage_path", sa.Text(), nullable=False),

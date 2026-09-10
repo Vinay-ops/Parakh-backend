@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database.database import Base
@@ -24,7 +24,7 @@ class InspectionImage(Base):
         Text, primary_key=True, default=lambda: str(uuid.uuid4())
     )
     inspection_id: Mapped[str] = mapped_column(
-        Text,
+        Uuid(as_uuid=False),
         ForeignKey("inspections.id", ondelete="CASCADE"),
         nullable=False,
         index=True,
