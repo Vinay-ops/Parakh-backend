@@ -8,7 +8,9 @@ class InspectionCreate(BaseModel):
     product_name: Optional[str] = Field(None, min_length=1, max_length=255)
     product_category: Optional[str] = Field(None, max_length=100)
     product_type: Optional[str] = Field(None, max_length=64)
-    side_count: Literal[2, 4]
+    # Default to 2 so callers that omit side_count (e.g. legacy createInspection)
+    # get a valid 2-sided inspection without a 422 error.
+    side_count: Literal[2, 4] = 2
 
 
 class InspectionOut(BaseModel):

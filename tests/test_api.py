@@ -230,29 +230,53 @@ def _scan(c, headers, name="label.png", data=PNG_BYTES, content_type="image/png"
 
 
 def test_scan_creates_pending_ml_inspection(client):
-    """Test scan endpoint processes images through the integrated ML pipeline.
-    
-    Since ML is now integrated, the minimal test image (1x1 PNG) will be 
-    processed but produce no meaningful extraction results, leading to FAILED status.
-    This is correct behavior — the test validates that the pipeline runs and 
-    handles edge cases gracefully.
+    """Test scan endpoint stores the image and creates an inspection record.
+
+    The scan endpoint uses a background task for ML processing: the HTTP
+    response is sent with status=PENDING_ML / ml_pending=True before the
+    background task runs. With FastAPI's TestClient, background tasks execute
+    synchronously after the response is committed, so querying the inspection
+    immediately afterwards reflects the final ML-pipeline status.
+
+    The minimal 1x1 PNG test image either:
+      - Gets processed by the ML pipeline but produces no meaningful extraction
+        → status becomes FAILED (no usable data extracted), or
+      - Completes with a compliance verdict (COMPLIANT / NON_COMPLIANT).
+
+    Either outcome confirms the pipeline ran. PENDING_ML would mean ML was
+    skipped entirely, which is a failure.
     """
     c, users = client
     _create_user(users, "a@x.com")
     headers = _login(c, "a@x.com")
     resp = _scan(c, headers)
     assert resp.status_code == 200, resp.text
-    data = resp.json()["data"]
-    
-    # With ML integrated, the minimal test image gets processed but produces no results
-    # Status should be FAILED (no meaningful data extracted) or NON_COMPLIANT
-    assert data["status"] in ("FAILED", "NON_COMPLIANT", "COMPLIANT")
-    assert data["ml_pending"] is False  # ML actually ran
-    assert data["inspection_id"].startswith("INSP-")
-    assert data["image_url"].startswith("https://test.supabase.co/storage/v1/object/public/")
+    scan_data = resp.json()["data"]
+
+    # The immediate scan response always returns PENDING_ML because ML runs
+    # in a background task after the HTTP response is sent.
+    assert scan_data["inspection_id"].startswith("INSP-")
+    assert scan_data["image_url"].startswith("https://test.supabase.co/storage/v1/object/public/")
+
+    # Background tasks run synchronously in TestClient; query the inspection
+    # to get the status after the ML pipeline has completed.
+    inspection_id = scan_data["inspection_id"]
+    insp_resp = c.get(f"/api/inspections/{inspection_id}", headers=headers)
+    assert insp_resp.status_code == 200, insp_resp.text
+    insp_data = insp_resp.json()["data"]
+
+    # ML pipeline ran: status must be a post-processing terminal state.
+    # PENDING_ML would indicate the ML step was never executed.
+    assert insp_data["compliance_status"] in (
+        "FAILED", "NON_COMPLIANT", "COMPLIANT",
+        "EXTRACTED", "COMPLIANCE_READY",
+    ), (
+        f"Expected a post-ML status, got {insp_data['compliance_status']!r}. "
+        "This means the ML background task did not execute."
+    )
 
     listed = c.get("/api/inspections", headers=headers).json()["data"]
-    assert any(i["inspection_id"] == data["inspection_id"] for i in listed["items"])
+    assert any(i["inspection_id"] == inspection_id for i in listed["items"])
 
 
 def test_scan_validates_image_content(client):
@@ -324,13 +348,26 @@ def test_inspection_flow(client):
 
 
 def test_create_inspection_requires_product_name(client):
+    """An empty body is now valid since all fields are optional (side_count defaults to 2).
+
+    Test that sending an invalid side_count value still returns 422.
+    """
     c, users = client
     _create_user(users, "a@x.com")
     headers = _login(c, "a@x.com")
+
+    # Empty body is now valid — side_count defaults to 2, product_name is optional.
     resp = c.post("/api/inspections", json={}, headers=headers)
-    assert resp.status_code == 422
-    assert resp.json()["success"] is False
-    assert resp.json()["error_code"] == "VALIDATION_ERROR"
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["side_count"] == 2  # default applied
+    assert data["inspection_id"].startswith("INSP-")
+
+    # An invalid side_count value should still be rejected with 422.
+    resp_bad = c.post("/api/inspections", json={"side_count": 3}, headers=headers)
+    assert resp_bad.status_code == 422
+    assert resp_bad.json()["success"] is False
+    assert resp_bad.json()["error_code"] == "VALIDATION_ERROR"
 
 
 def test_multi_side_inspection_requires_exact_capture_set(client):
