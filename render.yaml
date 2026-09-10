@@ -1,0 +1,21 @@
+services:
+  - type: web
+    name: parakh-backend
+    runtime: python
+    # PaddlePaddle requires Python <=3.12. Pin to 3.10 which has verified wheels.
+    pythonVersion: "3.10.14"
+    buildCommand: "bash build.sh"
+    startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: ALLOWED_ORIGINS
+        value: ""
+      - key: SUPABASE_STORAGE_BUCKET
+        value: product-images
