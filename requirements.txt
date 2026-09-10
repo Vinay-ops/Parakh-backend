@@ -8,5 +8,12 @@ httpx>=0.27
 pydantic[email]>=2.6
 alembic>=1.13
 
+# ML / OCR pipeline (legal-metrology integration)
+# paddlepaddle-gpu if a CUDA-capable GPU is available; paddlepaddle for CPU.
+# Use paddlepaddle for CPU (Render/cloud default); swap for paddlepaddle-gpu on GPU hosts.
+paddlepaddle>=2.6.0
+paddleocr>=2.9.1
+opencv-python-headless>=4.9.0.80
+
 # Development / test
 pytest>=8.0

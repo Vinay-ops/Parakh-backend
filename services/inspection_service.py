@@ -179,6 +179,11 @@ def apply_ml_result(db: Session, inspection: Inspection, ml_result: dict) -> Ins
     Called once the ML model is integrated. Creates/replaces the
     extracted_information row, replaces compliance_results rows, and updates
     the inspection's compliance status and score.
+
+    Status progression:
+      PROCESSING → EXTRACTED (if product_information populated)
+                → COMPLIANCE_READY (if compliance rules populated)  
+                → COMPLIANT/NON_COMPLIANT (final verdict)
     """
     product_information = ml_result["product_information"]
     compliance = ml_result["compliance"]
@@ -191,6 +196,7 @@ def apply_ml_result(db: Session, inspection: Inspection, ml_result: dict) -> Ins
             ComplianceResult.inspection_id == inspection.id
         ).delete()
 
+    # Persist extracted information
     extracted = ExtractedInformation(inspection_id=inspection.id, **{
         key: product_information.get(key)
         for key in (
@@ -203,12 +209,35 @@ def apply_ml_result(db: Session, inspection: Inspection, ml_result: dict) -> Ins
         )
     })
     db.add(extracted)
+
+    # Persist compliance results
     for rule in rules:
         db.add(ComplianceResult(inspection_id=inspection.id, **{
             key: rule.get(key)
             for key in ("rule_name", "status", "reason", "required_value", "detected_value", "bounding_box")
         }))
-    inspection.compliance_status = compliance.get("status") or "FAILED"
+
+    # Determine progressive status based on what was actually extracted/computed
+    final_status = compliance.get("status")
+    has_extracted_data = any(
+        product_information.get(k) is not None 
+        for k in ("common_product_name", "manufacturer_name", "mrp", "net_quantity_value")
+    )
+    has_compliance_rules = len(rules) > 0
+
+    if final_status in ("COMPLIANT", "NON_COMPLIANT"):
+        # Final compliance verdict available — use it directly
+        inspection.compliance_status = final_status
+    elif has_compliance_rules and has_extracted_data:
+        # Both extraction and compliance evaluation completed, but no final verdict
+        inspection.compliance_status = "COMPLIANCE_READY"
+    elif has_extracted_data:
+        # Extraction completed but no compliance evaluation yet
+        inspection.compliance_status = "EXTRACTED"
+    else:
+        # No meaningful extraction — mark as failed
+        inspection.compliance_status = "FAILED"
+
     inspection.compliance_score = compliance.get("score")
     db.commit()
     db.refresh(inspection)

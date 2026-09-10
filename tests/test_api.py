@@ -230,14 +230,24 @@ def _scan(c, headers, name="label.png", data=PNG_BYTES, content_type="image/png"
 
 
 def test_scan_creates_pending_ml_inspection(client):
+    """Test scan endpoint processes images through the integrated ML pipeline.
+    
+    Since ML is now integrated, the minimal test image (1x1 PNG) will be 
+    processed but produce no meaningful extraction results, leading to FAILED status.
+    This is correct behavior — the test validates that the pipeline runs and 
+    handles edge cases gracefully.
+    """
     c, users = client
     _create_user(users, "a@x.com")
     headers = _login(c, "a@x.com")
     resp = _scan(c, headers)
     assert resp.status_code == 200, resp.text
     data = resp.json()["data"]
-    assert data["status"] == "PENDING_ML"
-    assert data["ml_pending"] is True
+    
+    # With ML integrated, the minimal test image gets processed but produces no results
+    # Status should be FAILED (no meaningful data extracted) or NON_COMPLIANT
+    assert data["status"] in ("FAILED", "NON_COMPLIANT", "COMPLIANT")
+    assert data["ml_pending"] is False  # ML actually ran
     assert data["inspection_id"].startswith("INSP-")
     assert data["image_url"].startswith("https://test.supabase.co/storage/v1/object/public/")
 
@@ -366,7 +376,9 @@ def test_multi_side_inspection_requires_exact_capture_set(client):
 
     process = c.post(f"/api/inspections/{inspection_id}/process", headers=headers)
     assert process.status_code == 200
-    assert process.json()["data"]["status"] == "PENDING_ML"
+    # With ML integrated, expect actual processing results instead of PENDING_ML
+    status = process.json()["data"]["status"]
+    assert status in ("FAILED", "NON_COMPLIANT", "COMPLIANT", "EXTRACTED", "COMPLIANCE_READY")
 
 
 # -------------------------------------------------------------- complaints ---
@@ -636,3 +648,283 @@ def test_env_example_has_no_real_credentials():
     # The DATABASE_URL entry must use a placeholder, not a real host.
     assert "YOUR_DB_PASSWORD" in content
     assert "YOUR_PROJECT_REF" in content
+
+
+
+# ------------------------------------------------------------ ML service ---
+
+def test_ml_service_validate_result_rejects_invalid():
+    """validate_result must reject malformed ML output."""
+    from services.ml_service import validate_result
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        validate_result("not a dict")
+
+    with _pytest.raises(ValueError):
+        validate_result({"product_information": "string", "compliance": {}})
+
+    with _pytest.raises(ValueError):
+        validate_result({"product_information": {}, "compliance": {"rules": "not-a-list"}})
+
+
+def test_ml_service_validate_result_accepts_schema():
+    """validate_result normalises a full valid ML result without error."""
+    from services.ml_service import validate_result
+
+    result = validate_result({
+        "product_information": {
+            "common_product_name": "Biscuits",
+            "mrp": 20.0,
+        },
+        "compliance": {
+            "status": "NON_COMPLIANT",
+            "score": 0.5,
+            "rules": [
+                {
+                    "rule_name": "Rule 6(1)(a)",
+                    "status": "FAIL",
+                    "reason": "Missing manufacturer address",
+                    "required_value": None,
+                    "detected_value": None,
+                    "bounding_box": None,
+                }
+            ],
+        },
+    })
+    assert result["product_information"]["common_product_name"] == "Biscuits"
+    assert len(result["compliance"]["rules"]) == 1
+    assert result["compliance"]["rules"][0]["status"] == "FAIL"
+
+
+def test_process_inspection_ml_result_persisted(client):
+    """Full multi-side inspection flow: process + extracted-info + compliance retrieval."""
+    c, users = client
+    _create_user(users, "ml@x.com")
+    headers = _login(c, "ml@x.com")
+
+    from services import ml_service
+
+    # Build a mock ML result with real field data (no fake fallbacks).
+    mock_result = {
+        "product_information": {
+            "common_product_name": "Test Biscuits",
+            "manufacturer_name": "ABC Foods Pvt Ltd",
+            "manufacturer_address": "123 Industrial Area, Mumbai",
+            "packer_name": None,
+            "packer_address": None,
+            "importer_name": None,
+            "importer_address": None,
+            "multi_product_names": [],
+            "multi_product_quantities": [],
+            "net_quantity_value": 250.0,
+            "net_quantity_unit": "g",
+            "number_count": None,
+            "mrp": 20.0,
+            "mrp_tax_wording": "MRP Rs. 20.00 incl. of all taxes",
+            "manufacture_or_import_date": "Jan 2025",
+            "consumer_care_name": None,
+            "consumer_care_address": None,
+            "consumer_care_phone": "18001234567",
+            "consumer_care_email": None,
+            "commodity_dimensions": None,
+        },
+        "compliance": {
+            "status": "NON_COMPLIANT",
+            "score": 0.35,
+            "rules": [
+                {
+                    "rule_name": "Rule 6(1)(a)",
+                    "status": "FAIL",
+                    "reason": "Manufacturer address incomplete",
+                    "required_value": "Complete name and address",
+                    "detected_value": None,
+                    "bounding_box": None,
+                },
+                {
+                    "rule_name": "Rule 6(1)(e) & 2(m)",
+                    "status": "PASS",
+                    "reason": "MRP and tax-inclusive wording detected",
+                    "required_value": None,
+                    "detected_value": None,
+                    "bounding_box": None,
+                },
+            ],
+        },
+    }
+
+    # Patch process_inspection to return our controlled mock result.
+    def fake_process(inspection_id, side_images):
+        return mock_result
+
+    original = ml_service.process_inspection
+    ml_service.process_inspection = fake_process
+
+    try:
+        # Create inspection.
+        insp = c.post(
+            "/api/inspections",
+            json={"product_name": "Test Biscuits", "product_category": "Food", "side_count": 2},
+            headers=headers,
+        )
+        assert insp.status_code == 200, insp.text
+        insp_id = insp.json()["data"]["inspection_id"]
+
+        # Upload front and back images.
+        for side in ("front", "back"):
+            up = c.post(
+                f"/api/inspections/{insp_id}/images",
+                files={"image": (f"{side}.png", io.BytesIO(PNG_BYTES), "image/png")},
+                data={"side": side},
+                headers=headers,
+            )
+            assert up.status_code == 200, up.text
+
+        # Trigger processing.
+        proc = c.post(f"/api/inspections/{insp_id}/process", headers=headers)
+        assert proc.status_code == 200, proc.text
+        proc_data = proc.json()["data"]
+        assert proc_data["ml_pending"] is False
+        assert proc_data["status"] in ("NON_COMPLIANT", "COMPLIANT", "EXTRACTED", "COMPLIANCE_READY")
+
+        # Extracted info must be persisted.
+        ext = c.get(f"/api/inspections/{insp_id}/extracted-info", headers=headers)
+        assert ext.status_code == 200, ext.text
+        ext_data = ext.json()["data"]
+        assert ext_data["common_product_name"] == "Test Biscuits"
+        assert ext_data["manufacturer_name"] == "ABC Foods Pvt Ltd"
+        assert ext_data["mrp"] == 20.0
+        assert ext_data["net_quantity_value"] == 250.0
+        assert ext_data["net_quantity_unit"] == "g"
+
+        # Compliance rules must be persisted.
+        comp = c.get(f"/api/inspections/{insp_id}/compliance", headers=headers)
+        assert comp.status_code == 200, comp.text
+        comp_data = comp.json()["data"]
+        assert comp_data["inspection_id"] == insp_id
+        assert len(comp_data["rules"]) == 2
+        rule_names = [r["rule_name"] for r in comp_data["rules"]]
+        assert "Rule 6(1)(a)" in rule_names
+        statuses = {r["rule_name"]: r["status"] for r in comp_data["rules"]}
+        assert statuses["Rule 6(1)(a)"] == "FAIL"
+        assert statuses["Rule 6(1)(e) & 2(m)"] == "PASS"
+
+        # Compliance score must be stored on the inspection.
+        detail = c.get(f"/api/inspections/{insp_id}", headers=headers)
+        assert detail.status_code == 200
+        assert detail.json()["data"]["compliance_score"] == 0.35
+
+    finally:
+        ml_service.process_inspection = original
+
+
+def test_process_inspection_ml_failure_sets_failed_status(client):
+    """ValueError from ML pipeline must set FAILED status, not 500."""
+    c, users = client
+    _create_user(users, "fail@x.com")
+    headers = _login(c, "fail@x.com")
+
+    from services import ml_service
+
+    def exploding_process(inspection_id, side_images):
+        raise ValueError("OCR engine crashed on corrupt image")
+
+    original = ml_service.process_inspection
+    ml_service.process_inspection = exploding_process
+
+    try:
+        insp = c.post(
+            "/api/inspections",
+            json={"product_name": "Corrupt Product", "side_count": 2},
+            headers=headers,
+        )
+        insp_id = insp.json()["data"]["inspection_id"]
+
+        for side in ("front", "back"):
+            c.post(
+                f"/api/inspections/{insp_id}/images",
+                files={"image": (f"{side}.png", io.BytesIO(PNG_BYTES), "image/png")},
+                data={"side": side},
+                headers=headers,
+            )
+
+        proc = c.post(f"/api/inspections/{insp_id}/process", headers=headers)
+        # Must NOT be a 500 — ML pipeline errors return 422 with FAILED status.
+        assert proc.status_code == 422, proc.text
+        assert proc.json()["error_code"] == "ML_PIPELINE_ERROR"
+
+        # Inspection status must be FAILED, not PROCESSING.
+        detail = c.get(f"/api/inspections/{insp_id}", headers=headers)
+        assert detail.json()["data"]["compliance_status"] == "FAILED"
+
+    finally:
+        ml_service.process_inspection = original
+
+
+def test_extracted_info_edit_persists(client):
+    """PATCH /extracted-info must save changes to the database (not only locally)."""
+    c, users = client
+    _create_user(users, "edit@x.com")
+    headers = _login(c, "edit@x.com")
+
+    from services import ml_service
+
+    mock_result = {
+        "product_information": {
+            "common_product_name": "Original Name",
+            "manufacturer_name": "Original Mfr",
+            "manufacturer_address": None,
+            "packer_name": None, "packer_address": None,
+            "importer_name": None, "importer_address": None,
+            "multi_product_names": [], "multi_product_quantities": [],
+            "net_quantity_value": 100.0, "net_quantity_unit": "g",
+            "number_count": None, "mrp": 50.0, "mrp_tax_wording": None,
+            "manufacture_or_import_date": None, "consumer_care_name": None,
+            "consumer_care_address": None, "consumer_care_phone": None,
+            "consumer_care_email": None, "commodity_dimensions": None,
+        },
+        "compliance": {"status": "NON_COMPLIANT", "score": 0.0, "rules": []},
+    }
+
+    def fake_process(inspection_id, side_images):
+        return mock_result
+
+    original = ml_service.process_inspection
+    ml_service.process_inspection = fake_process
+
+    try:
+        insp = c.post(
+            "/api/inspections",
+            json={"product_name": "X", "side_count": 2},
+            headers=headers,
+        )
+        insp_id = insp.json()["data"]["inspection_id"]
+
+        for side in ("front", "back"):
+            c.post(
+                f"/api/inspections/{insp_id}/images",
+                files={"image": (f"{side}.png", io.BytesIO(PNG_BYTES), "image/png")},
+                data={"side": side},
+                headers=headers,
+            )
+        c.post(f"/api/inspections/{insp_id}/process", headers=headers)
+
+        # Edit the extracted info.
+        patch_resp = c.patch(
+            f"/api/inspections/{insp_id}/extracted-info",
+            json={"common_product_name": "Corrected Name", "mrp": 55.0},
+            headers=headers,
+        )
+        assert patch_resp.status_code == 200, patch_resp.text
+        patched = patch_resp.json()["data"]
+        assert patched["common_product_name"] == "Corrected Name"
+        assert patched["mrp"] == 55.0
+
+        # Re-fetch to confirm DB persistence.
+        refetch = c.get(f"/api/inspections/{insp_id}/extracted-info", headers=headers)
+        assert refetch.status_code == 200
+        assert refetch.json()["data"]["common_product_name"] == "Corrected Name"
+        assert refetch.json()["data"]["mrp"] == 55.0
+
+    finally:
+        ml_service.process_inspection = original

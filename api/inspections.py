@@ -239,7 +239,16 @@ def process_inspection(
         except ml_service.MLNotIntegratedError:
             inspection.compliance_status = "PENDING_ML"
             db.commit()
-            pass
+        except ValueError as exc:
+            # ML pipeline raised a recoverable error (image decode, OCR failure, etc.)
+            # Mark the inspection FAILED so the client knows processing did not succeed.
+            import logging as _logging
+            _logging.getLogger(__name__).error(
+                "ML pipeline error for %s: %s", inspection_id, exc
+            )
+            inspection.compliance_status = "FAILED"
+            db.commit()
+            error(str(exc), "ML_PIPELINE_ERROR", 422)
     except image_service.ImageValidationError as exc:
         inspection.compliance_status = "FAILED"
         db.commit()
