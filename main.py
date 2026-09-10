@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
-from api import auth, complaints, dashboard, inspections, profile, scan
+from api import admin, auth, complaints, dashboard, inspections, profile, scan
 from database.database import engine
 
 load_dotenv()
@@ -69,6 +69,7 @@ if allowed_origins:
     )
 
 app.include_router(auth.router)
+app.include_router(admin.router)
 app.include_router(scan.router)
 app.include_router(inspections.router)
 app.include_router(complaints.router)

@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, String, Text, Uuid, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from database.database import Base
@@ -27,6 +27,10 @@ class Profile(Base):
     profile_image_url: Mapped[str] = mapped_column(Text, nullable=True)
     role: Mapped[str] = mapped_column(String(100), nullable=True)
     department: Mapped[str] = mapped_column(String(100), nullable=True)
+    # Added in migration 0003
+    employee_id: Mapped[str] = mapped_column(String(100), nullable=True, unique=False)
+    phone: Mapped[str] = mapped_column(String(30), nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, server_default="true")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

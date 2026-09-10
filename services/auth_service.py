@@ -9,7 +9,9 @@ The backend validates that token with Supabase's /auth/v1/user endpoint and
 derives the authenticated user id from the response. The backend never issues
 its own JWT, never sees stored passwords, and never keeps credentials.
 
-No registration endpoints exist — accounts are provisioned in Supabase Auth.
+No registration endpoints exist for inspectors — accounts are provisioned by
+admins via the backend using the Supabase Auth Admin API (service-role key).
+The service-role key NEVER leaves the backend.
 """
 import os
 
@@ -20,14 +22,32 @@ load_dotenv()
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
 SUPABASE_ANON_KEY = os.getenv("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
 
 class InvalidCredentialsError(Exception):
     pass
 
 
-def _auth_headers() -> dict:
+class UserAlreadyExistsError(Exception):
+    pass
+
+
+class AuthServiceError(Exception):
+    pass
+
+
+def _anon_headers() -> dict:
     return {"apikey": SUPABASE_ANON_KEY, "Content-Type": "application/json"}
+
+
+def _service_role_headers() -> dict:
+    """Headers using the service-role key — ONLY for server-side admin operations."""
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
 
 
 def sign_in_with_password(email: str, password: str) -> dict:
@@ -37,7 +57,7 @@ def sign_in_with_password(email: str, password: str) -> dict:
         resp = httpx.post(
             url,
             json={"email": email, "password": password},
-            headers=_auth_headers(),
+            headers=_anon_headers(),
             timeout=10,
         )
     except httpx.HTTPError as exc:
@@ -77,3 +97,60 @@ def authenticate(email: str, password: str) -> dict:
         "user_id": user["id"],
         "email": user.get("email"),
     }
+
+
+def create_user_with_service_role(email: str, password: str) -> dict:
+    """Create a new Supabase Auth user using the Admin API (service-role key).
+
+    This function MUST ONLY be called from the backend. The service-role key
+    is never exposed to the browser.
+
+    Returns the created user dict: {"id", "email", ...}
+    Raises:
+        UserAlreadyExistsError: if a user with that email already exists.
+        AuthServiceError: on any other Supabase error.
+    """
+    url = f"{SUPABASE_URL}/auth/v1/admin/users"
+    try:
+        resp = httpx.post(
+            url,
+            json={
+                "email": email,
+                "password": password,
+                "email_confirm": True,  # Auto-confirm so inspector can log in immediately
+            },
+            headers=_service_role_headers(),
+            timeout=15,
+        )
+    except httpx.HTTPError as exc:
+        raise AuthServiceError(f"Auth service unavailable: {exc}") from exc
+
+    if resp.status_code == 422:
+        body = resp.json()
+        msg = body.get("msg") or body.get("message") or str(body)
+        if "already" in msg.lower() or "duplicate" in msg.lower() or "exists" in msg.lower():
+            raise UserAlreadyExistsError(f"A user with email '{email}' already exists")
+        raise AuthServiceError(f"Supabase validation error: {msg}")
+
+    if resp.status_code not in (200, 201):
+        body = resp.json()
+        msg = body.get("msg") or body.get("message") or body.get("error_description") or str(body)
+        if "already registered" in msg.lower() or "already exists" in msg.lower():
+            raise UserAlreadyExistsError(f"A user with email '{email}' already exists")
+        raise AuthServiceError(f"Failed to create user: {msg}")
+
+    return resp.json()
+
+
+def delete_user_with_service_role(user_id: str) -> None:
+    """Delete a Supabase Auth user by ID — used for rollback on partial failures.
+
+    MUST ONLY be called from the backend.
+    """
+    url = f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}"
+    try:
+        resp = httpx.delete(url, headers=_service_role_headers(), timeout=15)
+    except httpx.HTTPError as exc:
+        raise AuthServiceError(f"Auth service unavailable: {exc}") from exc
+    if resp.status_code not in (200, 204):
+        raise AuthServiceError(f"Failed to delete user {user_id}: {resp.text}")
