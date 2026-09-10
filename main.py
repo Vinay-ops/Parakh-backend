@@ -55,18 +55,24 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS: optional, configurable via ALLOWED_ORIGINS (comma-separated exact
-# origins). Mobile (Flutter) clients do not need CORS, so no middleware is
-# added when the variable is unset.
-allowed_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-if allowed_origins:
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=allowed_origins,
-        allow_credentials=True,
-        allow_methods=["*"],
-        allow_headers=["*"],
-    )
+# CORS: configurable via ALLOWED_ORIGINS (comma-separated exact origins).
+# Always allow localhost variants for local development.
+# Mobile (Flutter) clients do not need CORS.
+_raw_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+_dev_origins = [
+    "http://localhost:5173",
+    "http://localhost:3000",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:3000",
+]
+allowed_origins = list(dict.fromkeys(_raw_origins + _dev_origins))  # deduplicated, prod first
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=allowed_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.include_router(auth.router)
 app.include_router(admin.router)
