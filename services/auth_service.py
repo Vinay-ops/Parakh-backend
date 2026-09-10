@@ -74,12 +74,28 @@ def get_user_from_token(access_token: str) -> dict:
     the backend never needs to manage JWT signing secrets.
     """
     url = f"{SUPABASE_URL}/auth/v1/user"
-    headers = {"apikey": SUPABASE_ANON_KEY, "Authorization": f"Bearer {access_token}"}
+    # Token validation is a backend operation. Prefer the service-role key so
+    # validation does not fail when the public anon key has been rotated, while
+    # keeping the credential entirely inside the backend process.
+    api_keys = [key for key in (SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY) if key]
+    if not api_keys:
+        raise InvalidCredentialsError("Authentication service is not configured")
     try:
-        resp = httpx.get(url, headers=headers, timeout=10)
+        resp = None
+        for api_key in api_keys:
+            resp = httpx.get(
+                url,
+                headers={
+                    "apikey": api_key,
+                    "Authorization": f"Bearer {access_token}",
+                },
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                break
     except httpx.HTTPError as exc:
         raise InvalidCredentialsError("Authentication service unavailable") from exc
-    if resp.status_code != 200:
+    if resp is None or resp.status_code != 200:
         raise InvalidCredentialsError("Invalid or expired token")
     data = resp.json()
     return {"user_id": data["id"], "email": data.get("email")}
