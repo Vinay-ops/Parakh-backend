@@ -1,12 +1,13 @@
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
-from database.database import get_db
+from database.database import SessionLocal, get_db
 from middleware.authentication import get_current_user
 from services import image_service, inspection_service, ml_service
+from database.models import Inspection, VALID_SIDES
 from utils.helpers import error, ok
 
 router = APIRouter(prefix="/api", tags=["scan"])
@@ -16,8 +17,49 @@ router = APIRouter(prefix="/api", tags=["scan"])
 # upload -> validate -> store -> inspection record -> ML -> persist results.
 
 
+def _process_scan_in_background(
+    inspection_id: str,
+    image_bytes: bytes,
+    extension: str,
+) -> None:
+    """Run legacy single-image ML after the upload response is sent."""
+    db = SessionLocal()
+    local_path = Path(tempfile.gettempdir()) / f"parakh_{inspection_id}{extension}"
+    try:
+        inspection = db.query(Inspection).filter(
+            Inspection.inspection_id == inspection_id
+        ).first()
+        if inspection is None:
+            return
+
+        inspection.compliance_status = "PROCESSING"
+        db.commit()
+        local_path.write_bytes(image_bytes)
+        raw_result = ml_service.process_inspection(
+            inspection_id,
+            [("front", str(local_path))],
+        )
+        ml_result = ml_service.validate_result(raw_result)
+        inspection_service.apply_ml_result(db, inspection, ml_result)
+    except ml_service.MLNotIntegratedError:
+        inspection.compliance_status = "PENDING_ML"
+        db.commit()
+    except Exception:
+        db.rollback()
+        inspection = db.query(Inspection).filter(
+            Inspection.inspection_id == inspection_id
+        ).first()
+        if inspection is not None:
+            inspection.compliance_status = "FAILED"
+            db.commit()
+    finally:
+        local_path.unlink(missing_ok=True)
+        db.close()
+
+
 @router.post("/scan")
 async def scan(
+    background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
     product_name: str | None = Form(None),
     product_category: str | None = Form(None),
@@ -58,34 +100,19 @@ async def scan(
     db.commit()
     db.refresh(inspection)
 
-    # --- ML pipeline boundary: everything below is the ML team's slot. ---
-    # The stored image is materialised to a local path for the ML pipeline.
-    # process_image raises NotImplementedError until the model is integrated,
-    # in which case the inspection stays in PENDING_ML and the app shows the
-    # "processing" state until the backend is upgraded.
-    ml_pending = True
-    local_path = Path(tempfile.gettempdir()) / f"parakh_{inspection.id}{extension}"
-    local_path.write_bytes(data)
-    try:
-        raw_result = ml_service.process_inspection(inspection.inspection_id, [("front", str(local_path))])
-        ml_result = ml_service.validate_result(raw_result)
-        inspection = inspection_service.apply_ml_result(db, inspection, ml_result)
-        ml_pending = False
-    except ml_service.MLNotIntegratedError:
-        pass
-    finally:
-        local_path.unlink(missing_ok=True)
+    background_tasks.add_task(
+        _process_scan_in_background,
+        inspection.inspection_id,
+        bytes(data),
+        extension,
+    )
 
     return ok(
         data={
             "inspection_id": inspection.inspection_id,
             "image_url": inspection.product_image_url,
             "status": inspection.compliance_status,
-            "ml_pending": ml_pending,
+            "ml_pending": True,
         },
-        message=(
-            "Image stored and inspection created. ML processing pending integration."
-            if ml_pending
-            else "Inspection completed."
-        ),
+        message="Image stored and ML processing started.",
     )
