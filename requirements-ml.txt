@@ -1,10 +1,14 @@
-# ML / OCR pipeline dependencies (Python 3.10 required — PaddlePaddle has no
-# wheels for Python 3.11+ on Linux as of 2026).
+# ML / OCR pipeline dependencies.
+#
+# PaddlePaddle 3.x supports Python 3.9–3.13 (including 3.12, 3.13).
+# The earlier Python <=3.10 constraint was based on PaddlePaddle 2.x and is
+# no longer valid. As of 2026, paddlepaddle 3.3.1 ships manylinux wheels for
+# Python 3.9 through 3.13.
 #
 # Install separately AFTER requirements.txt:
 #   pip install -r requirements-ml.txt
 #
 # On a CUDA-capable host, replace paddlepaddle with paddlepaddle-gpu.
-paddlepaddle>=2.6.0
+paddlepaddle>=3.0.0
 paddleocr>=2.9.1
 opencv-python-headless>=4.9.0.80

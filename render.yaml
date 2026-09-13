@@ -2,11 +2,15 @@ services:
   - type: web
     name: parakh-backend
     runtime: python
-    # PaddlePaddle requires Python <=3.12. Pin to 3.10 which has verified wheels.
-    pythonVersion: "3.10.14"
     buildCommand: "bash build.sh"
     startCommand: "uvicorn main:app --host 0.0.0.0 --port $PORT"
     envVars:
+      - key: PYTHON_VERSION
+        # Render's highest-precedence Python pin (PYTHON_VERSION env var beats
+        # .python-version file and runtime.txt). PaddlePaddle 3.x supports
+        # Python 3.9–3.13; using 3.12.10 as it is stable and widely supported.
+        # Must be a fully-qualified version string (major.minor.patch).
+        value: "3.12.10"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_ANON_KEY
@@ -16,6 +20,13 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: ALLOWED_ORIGINS
+        # Production Vercel origin first; legacy Render origin kept in case a
+        # staging copy of the admin web is still deployed there.
+        # Preview deployments on Vercel are NOT used for this project (no
+        # per-branch deploy workflow configured), so a single fixed origin is
+        # sufficient. If preview deploys are ever enabled, switch to an
+        # ALLOWED_ORIGINS_PATTERN env var and a custom origin-matching function
+        # in main.py instead of a hardcoded list.
         value: "https://parakh-web-sih.vercel.app,https://parakh-web.onrender.com"
       - key: ENVIRONMENT
         value: "production"

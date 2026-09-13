@@ -1,4 +1,6 @@
 import os
+
+import os
 from contextlib import asynccontextmanager
 
 from dotenv import load_dotenv
@@ -41,6 +43,32 @@ def _validate_config() -> None:
         )
 
 
+def _build_allowed_origins() -> list[str]:
+    """Build the CORS allowed-origins list from environment configuration.
+
+    ALLOWED_ORIGINS is a comma-separated list of exact origins (no wildcards).
+    Localhost variants are appended only in development mode so the dev server
+    works without touching production config.
+
+    Preview deployments on Vercel are NOT used for this project, so a single
+    fixed production origin is sufficient. If preview deployments are ever
+    enabled, replace this with a custom allow_origin_regex or a
+    CORSMiddleware subclass that does pattern matching against the Vercel
+    preview URL pattern (e.g. https://parakh-web-sih-*.vercel.app).
+    """
+    raw = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
+    dev_origins: list[str] = []
+    if os.getenv("ENVIRONMENT", "production").lower() == "development":
+        dev_origins = [
+            "http://localhost:5173",
+            "http://localhost:3000",
+            "http://127.0.0.1:5173",
+            "http://127.0.0.1:3000",
+        ]
+    # Deduplicate while preserving order (production origins first).
+    return list(dict.fromkeys(raw + dev_origins))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _validate_config()
@@ -66,31 +94,41 @@ limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
-# Security headers (CSP) — must be added before RequestLoggingMiddleware
-# so it runs last and its headers are not overwritten.
-app.add_middleware(SecurityHeadersMiddleware)
+# ── Middleware registration order ─────────────────────────────────────────────
+# Starlette applies middleware in REVERSE registration order: the LAST
+# add_middleware() call produces the OUTERMOST layer (runs first on every
+# inbound request, last on every outbound response).
+#
+# Execution order (outermost → innermost):
+#   1. CORSMiddleware          — outermost. Intercepts OPTIONS preflight
+#                                requests and short-circuits them with 200 +
+#                                CORS headers before they reach any route
+#                                handler, rate limiter, or body validator.
+#                                Must be registered LAST so it runs FIRST.
+#   2. RequestLoggingMiddleware — logs after CORS decides; the logged status
+#                                 code reflects the actual response (200 for
+#                                 a well-formed preflight, not a false 400).
+#   3. SecurityHeadersMiddleware — innermost; stamps security headers onto
+#                                  the response returned by the route handler.
+#
+# Root cause of the OPTIONS 400 (Bug 3 — documented here for posterity):
+#   Starlette's CORSMiddleware only short-circuits a preflight when the
+#   request's Origin is present in allow_origins. Before Bug 1 was fixed,
+#   ALLOWED_ORIGINS contained only https://parakh-web.onrender.com while the
+#   real admin web lives at https://parakh-web-sih.vercel.app. Because the
+#   origin didn't match, CORSMiddleware passed the OPTIONS request through to
+#   the POST /api/auth/login handler. That handler has a required Pydantic
+#   body (LoginRequest), so the empty OPTIONS body triggered a 400 validation
+#   error. The primary fix is the correct ALLOWED_ORIGINS value (Bug 1).
+#   The middleware order below is already correct and has not changed.
 
-# Structured request logging (A3)
-app.add_middleware(RequestLoggingMiddleware)
-
-# CORS: configurable via ALLOWED_ORIGINS (comma-separated exact origins).
-# Localhost variants are only included in development (ENVIRONMENT=development).
-# Mobile (Flutter) clients do not need CORS.
-_raw_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-_dev_origins: list[str] = []
-if os.getenv("ENVIRONMENT", "production").lower() == "development":
-    _dev_origins = [
-        "http://localhost:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:5173",
-        "http://127.0.0.1:3000",
-    ]
-allowed_origins = list(dict.fromkeys(_raw_origins + _dev_origins))  # deduplicated, prod first
-app.add_middleware(
+app.add_middleware(SecurityHeadersMiddleware)   # registered 1st → runs LAST (innermost)
+app.add_middleware(RequestLoggingMiddleware)    # registered 2nd → runs 2nd
+app.add_middleware(                            # registered LAST → runs FIRST (outermost)
     CORSMiddleware,
-    allow_origins=allowed_origins,
+    allow_origins=_build_allowed_origins(),
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["*"],   # includes OPTIONS — required for preflight handling
     allow_headers=["*"],
 )
 
