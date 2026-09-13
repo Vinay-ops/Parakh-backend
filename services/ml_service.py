@@ -58,24 +58,26 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Locate the legal-metrology source tree relative to this file.
-# Layout:
-#   26034/
-#     backend/services/ml_service.py      ← this file
-#     legal-metrology/src/                ← pipeline source
+# Locate the ML pipeline source bundled inside the backend repo.
+# Layout (both locally and on Render):
+#   backend/
+#     services/ml_service.py        ← this file
+#     ml_pipeline/
+#       ocr/          image_processor.py, ocr_engine.py, ocr_parser.py
+#       extraction/   extractor.py
+#       rules/        rule_engine.py
+#       data/         legal_metrology_rules.csv, extraction_schema.json
 # ---------------------------------------------------------------------------
 _THIS_DIR = Path(__file__).resolve().parent          # backend/services/
 _BACKEND_DIR = _THIS_DIR.parent                       # backend/
-_REPO_ROOT = _BACKEND_DIR.parent                      # 26034/
-_LM_SRC = _REPO_ROOT / "legal-metrology" / "src"
-_LM_DATA = _REPO_ROOT / "legal-metrology" / "data"
-_SCHEMA_PATH = _LM_DATA / "rules" / "extraction_schema.json"
-_RULES_PATH = _LM_DATA / "rules" / "legal_metrology_rules.csv"
+_ML_PIPELINE_DIR = _BACKEND_DIR / "ml_pipeline"
+_SCHEMA_PATH = _ML_PIPELINE_DIR / "data" / "extraction_schema.json"
+_RULES_PATH = _ML_PIPELINE_DIR / "data" / "legal_metrology_rules.csv"
 
-# Add the legal-metrology/src directories to sys.path so we can import
-# the pipeline modules without installing them as packages.
-for _subdir in ("ocr", "extraction", "rules", "report"):
-    _p = str(_LM_SRC / _subdir)
+# Add each sub-package directory to sys.path so the modules can be imported
+# by their bare names (e.g. `from ocr_engine import OCREngine`).
+for _subdir in ("ocr", "extraction", "rules"):
+    _p = str(_ML_PIPELINE_DIR / _subdir)
     if _p not in sys.path:
         sys.path.insert(0, _p)
 

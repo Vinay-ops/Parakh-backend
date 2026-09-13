@@ -1,0 +1,108 @@
+{
+    "roles": [
+        {
+            "role": "manufacturer",
+            "labels": [
+                "manufactured by",
+                "manufacturer"
+            ]
+        },
+        {
+            "role": "packer",
+            "labels": [
+                "packed by",
+                "packer"
+            ]
+        },
+        {
+            "role": "importer",
+            "labels": [
+                "importer",
+                "imported by"
+            ]
+        },
+        {
+            "role": "marketed_by",
+            "labels": [
+                "marketed by"
+            ]
+        },
+        {
+            "role": "manufactured_for",
+            "labels": [
+                "manufactured for"
+            ]
+        }
+    ],
+    "fields": [
+        {
+            "name": "mrp",
+            "value_type": "currency",
+            "labels": [
+                "mrp",
+                "maximum retail price",
+                "retail price"
+            ]
+        },
+        {
+            "name": "net_quantity",
+            "value_type": "quantity",
+            "labels": [
+                "net quantity",
+                "net weight",
+                "net wt",
+                "quantity"
+            ]
+        },
+        {
+            "name": "address",
+            "value_type": "address",
+            "labels": [
+                "address",
+                "registered office",
+                "manufactured at",
+                "packed at"
+            ]
+        },
+        {
+            "name": "manufacturing_or_packing_date",
+            "value_type": "date",
+            "labels": [
+                "mfg",
+                "mfg date",
+                "manufacturing date",
+                "manufactured on",
+                "pkd",
+                "packed on",
+                "packing date"
+            ]
+        },
+        {
+            "name": "expiry_or_use_by_date",
+            "value_type": "date",
+            "labels": [
+                "expiry",
+                "expiry date",
+                "exp",
+                "use by",
+                "best before"
+            ]
+        },
+        {
+            "name": "consumer_care",
+            "value_type": "contact",
+            "labels": [
+                "consumer care",
+                "customer care",
+                "helpline",
+                "toll free",
+                "contact us"
+            ]
+        },
+        {
+            "name": "other_declarations",
+            "value_type": "text",
+            "labels": []
+        }
+    ]
+}
