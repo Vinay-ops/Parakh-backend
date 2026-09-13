@@ -14,6 +14,7 @@ from sqlalchemy import text
 from api import admin, auth, complaints, dashboard, inspections, profile, scan
 from database.database import engine
 from middleware.logging import RequestLoggingMiddleware
+from middleware.security import SecurityHeadersMiddleware
 
 load_dotenv()
 
@@ -64,6 +65,10 @@ app = FastAPI(
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Security headers (CSP) — must be added before RequestLoggingMiddleware
+# so it runs last and its headers are not overwritten.
+app.add_middleware(SecurityHeadersMiddleware)
 
 # Structured request logging (A3)
 app.add_middleware(RequestLoggingMiddleware)
