@@ -16,6 +16,8 @@ services:
       - key: DATABASE_URL
         sync: false
       - key: ALLOWED_ORIGINS
-        value: ""
+        value: "https://parakh-web.onrender.com"
+      - key: ENVIRONMENT
+        value: "production"
       - key: SUPABASE_STORAGE_BUCKET
         value: product-images

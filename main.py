@@ -6,10 +6,14 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 from sqlalchemy import text
 
 from api import admin, auth, complaints, dashboard, inspections, profile, scan
 from database.database import engine
+from middleware.logging import RequestLoggingMiddleware
 
 load_dotenv()
 
@@ -55,16 +59,27 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Rate limiter (S2) — limits per-IP using the client's remote address.
+# The limiter instance is shared with routers via app.state.
+limiter = Limiter(key_func=get_remote_address)
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+# Structured request logging (A3)
+app.add_middleware(RequestLoggingMiddleware)
+
 # CORS: configurable via ALLOWED_ORIGINS (comma-separated exact origins).
-# Always allow localhost variants for local development.
+# Localhost variants are only included in development (ENVIRONMENT=development).
 # Mobile (Flutter) clients do not need CORS.
 _raw_origins = [o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()]
-_dev_origins = [
-    "http://localhost:5173",
-    "http://localhost:3000",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:3000",
-]
+_dev_origins: list[str] = []
+if os.getenv("ENVIRONMENT", "production").lower() == "development":
+    _dev_origins = [
+        "http://localhost:5173",
+        "http://localhost:3000",
+        "http://127.0.0.1:5173",
+        "http://127.0.0.1:3000",
+    ]
 allowed_origins = list(dict.fromkeys(_raw_origins + _dev_origins))  # deduplicated, prod first
 app.add_middleware(
     CORSMiddleware,

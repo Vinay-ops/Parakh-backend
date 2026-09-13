@@ -16,13 +16,14 @@ from database.database import get_db
 from database.models import Inspection
 from middleware.authentication import get_current_admin
 from schemas.admin import AdminInspectionOut, InspectorCreate, InspectorOut, InspectorUpdate
+from schemas.complaint import ComplaintOut
 from schemas.inspection import (
     ComplianceRuleOut,
     ExtractedInformationOut,
     InspectionImageOut,
     InspectionOut,
 )
-from services import admin_service, auth_service, image_service, inspection_service
+from services import admin_service, auth_service, complaint_service, image_service, inspection_service
 from utils.helpers import error, ok
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
@@ -293,10 +294,6 @@ def list_all_complaints(
     _admin: dict = Depends(get_current_admin),
     db: Session = Depends(get_db),
 ):
-    from database.models import Complaint
-    from schemas.complaint import ComplaintOut
-    from services import complaint_service
-
     items, total = admin_service.admin_list_complaints(
         db, status=status, category=category, page=page, page_size=page_size
     )

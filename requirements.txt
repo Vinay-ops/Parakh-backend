@@ -8,6 +8,8 @@ httpx>=0.27
 pydantic[email]>=2.6
 alembic>=1.13
 numpy>=1.26
+python-jose[cryptography]>=3.3.0
+slowapi>=0.1.9
 
 # Development / test
 pytest>=8.0

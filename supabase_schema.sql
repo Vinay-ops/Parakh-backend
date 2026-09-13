@@ -85,12 +85,19 @@ drop policy if exists complaints_owner on public.complaints;
 create policy complaints_owner on public.complaints for all using (auth.uid()::text = user_id::text) with check (auth.uid()::text = user_id::text);
 
 insert into storage.buckets (id, name, public)
-values ('product-images', 'product-images', true)
+values ('product-images', 'product-images', false)
 on conflict (id) do nothing;
 
 drop policy if exists product_images_upload on storage.objects;
 create policy product_images_upload on storage.objects for insert to authenticated
 with check (bucket_id = 'product-images' and (storage.foldername(name))[1] = (select auth.uid()::text));
+
+-- ── Users can download their own images by known path (prevent LIST) ────────
+-- READ is restricted to authenticated users only. This prevents:
+--   1. Public LIST of bucket contents (storage.search does not work)
+--   2. Anonymous GET of images (must be authenticated)
+-- For per-user isolation, the upload policy already partitions uploads by user_id/...
+-- Download is authenticated-only; users can GET any object if they know the path.
 drop policy if exists product_images_read on storage.objects;
-create policy product_images_read on storage.objects for select to public
+create policy product_images_read on storage.objects for select to authenticated
 using (bucket_id = 'product-images');

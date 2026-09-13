@@ -1,3 +1,5 @@
+import asyncio
+import logging
 import tempfile
 from datetime import date
 from pathlib import Path
@@ -68,16 +70,19 @@ def list_inspections(
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    items, total = inspection_service.list_inspections(
-        db,
-        user["user_id"],
-        status=status,
-        category=category,
-        date_from=date_from,
-        date_to=date_to,
-        page=page,
-        page_size=page_size,
-    )
+    try:
+        items, total = inspection_service.list_inspections(
+            db,
+            user["user_id"],
+            status=status,
+            category=category,
+            date_from=date_from,
+            date_to=date_to,
+            page=page,
+            page_size=page_size,
+        )
+    except ValueError as exc:
+        error(str(exc), "INVALID_STATUS", 422)
     return ok(
         data={
             "items": [InspectionOut.model_validate(i).model_dump(mode="json") for i in items],
@@ -192,16 +197,15 @@ def list_inspection_images(
 
 
 @router.post("/{inspection_id}/process")
-def process_inspection(
+async def process_inspection(
     inspection_id: str,
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     """Trigger ML processing for an inspection that has all images uploaded.
 
-    The ML call is synchronous in the current architecture. Until the ML model
-    is integrated, the inspection stays in PENDING_ML and the client polls
-    GET /api/inspections/{id} for status changes.
+    Image downloads from Supabase Storage are parallelised via asyncio so a
+    4-side inspection downloads all sides concurrently instead of sequentially.
     """
     inspection = inspection_service.get_by_public_id(db, user["user_id"], inspection_id)
     if not inspection:
@@ -217,19 +221,54 @@ def process_inspection(
     inspection.compliance_status = "PROCESSING"
     db.commit()
 
-    # Build a list of (side, local_temp_path) pairs for the ML service.
+    # ── Parallel image downloads (P1) ────────────────────────────────────────
+    # Download all side images concurrently from Supabase Storage. For a 4-side
+    # inspection this cuts ~3× sequential HTTP latency to ~1× parallel latency.
+
+    import httpx as _httpx
+
+    async def _download_one(img) -> tuple[str, bytes, str]:
+        """Return (side, image_bytes, extension)."""
+        ext = Path(img.storage_path).suffix or ".jpg"
+        # Re-use the sync download_image logic but via async httpx client.
+        headers = {
+            "Authorization": f"Bearer {image_service.SUPABASE_SERVICE_ROLE_KEY}",
+            "apikey": image_service.SUPABASE_SERVICE_ROLE_KEY,
+        }
+        url = (
+            f"{image_service.SUPABASE_URL}/storage/v1/object"
+            f"/{image_service.SUPABASE_STORAGE_BUCKET}/{img.storage_path}"
+        )
+        async with _httpx.AsyncClient(timeout=30) as client:
+            resp = await client.get(url, headers=headers)
+        if resp.status_code != 200:
+            raise image_service.ImageValidationError(
+                f"Failed to download image for side '{img.side}' "
+                f"(HTTP {resp.status_code}).",
+                "STORAGE_ERROR",
+            )
+        return img.side, resp.content, ext
+
     ml_pending = True
+    tmp_files: list[Path] = []
     try:
+        # Fire all downloads at once.
+        download_results = await asyncio.gather(
+            *[_download_one(img) for img in images],
+            return_exceptions=True,
+        )
+
+        # Check for any download failures before touching the ML pipeline.
         side_paths: list[tuple[str, str]] = []
-        tmp_files: list[Path] = []
-        for img in images:
-            # Download image bytes from Supabase Storage for the ML pipeline.
-            img_bytes = image_service.download_image(img.storage_path)
-            ext = Path(img.storage_path).suffix or ".jpg"
-            tmp = Path(tempfile.gettempdir()) / f"parakh_{inspection.id}_{img.side}{ext}"
+        for result in download_results:
+            if isinstance(result, Exception):
+                raise result
+            side, img_bytes, ext = result
+            with tempfile.NamedTemporaryFile(suffix=ext, delete=False) as ntf:
+                tmp = Path(ntf.name)
             tmp.write_bytes(img_bytes)
             tmp_files.append(tmp)
-            side_paths.append((img.side, str(tmp)))
+            side_paths.append((side, str(tmp)))
 
         try:
             raw_result = ml_service.process_inspection(inspection.inspection_id, side_paths)
@@ -241,9 +280,7 @@ def process_inspection(
             db.commit()
         except ValueError as exc:
             # ML pipeline raised a recoverable error (image decode, OCR failure, etc.)
-            # Mark the inspection FAILED so the client knows processing did not succeed.
-            import logging as _logging
-            _logging.getLogger(__name__).error(
+            logging.getLogger(__name__).error(
                 "ML pipeline error for %s: %s", inspection_id, exc
             )
             inspection.compliance_status = "FAILED"

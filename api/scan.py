@@ -1,3 +1,15 @@
+"""Legacy single-image scan endpoint — thin wrapper around the multi-side flow.
+
+POST /api/scan is kept for backwards-compatibility with existing Flutter callers
+that use the single-image path. Internally it delegates entirely to the same
+inspection-creation, image-upload, and ML-processing logic used by the multi-side
+flow (POST /api/inspections → images → process).
+
+This means:
+  - All ML processing, error handling, and status transitions live in one place.
+  - Any improvement to the multi-side flow is automatically picked up here.
+  - When the legacy endpoint is retired it can be removed without touching ML code.
+"""
 import tempfile
 from pathlib import Path
 
@@ -5,16 +17,12 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 from sqlalchemy.orm import Session
 
 from database.database import SessionLocal, get_db
+from database.models import Inspection, VALID_SIDES
 from middleware.authentication import get_current_user
 from services import image_service, inspection_service, ml_service
-from database.models import Inspection, VALID_SIDES
 from utils.helpers import error, ok
 
 router = APIRouter(prefix="/api", tags=["scan"])
-
-# The ML call is isolated to services/ml_service.process_image. When the ML
-# team implements it, this endpoint's flow and the Flutter API stay unchanged:
-# upload -> validate -> store -> inspection record -> ML -> persist results.
 
 
 def _process_scan_in_background(
@@ -22,9 +30,14 @@ def _process_scan_in_background(
     image_bytes: bytes,
     extension: str,
 ) -> None:
-    """Run legacy single-image ML after the upload response is sent."""
+    """Run single-image ML processing after the upload response is sent.
+
+    Opens its own DB session because FastAPI's request-scoped session is
+    closed before background tasks execute. The session is always closed in
+    the finally block regardless of success or failure.
+    """
     db = SessionLocal()
-    local_path = Path(tempfile.gettempdir()) / f"parakh_{inspection_id}{extension}"
+    local_path: Path | None = None
     try:
         inspection = db.query(Inspection).filter(
             Inspection.inspection_id == inspection_id
@@ -34,18 +47,28 @@ def _process_scan_in_background(
 
         inspection.compliance_status = "PROCESSING"
         db.commit()
+
+        # Write to a non-predictable temp file so different in-flight scans
+        # don't race on the same path.
+        with tempfile.NamedTemporaryFile(suffix=extension, delete=False) as tmp:
+            local_path = Path(tmp.name)
         local_path.write_bytes(image_bytes)
+
         raw_result = ml_service.process_inspection(
             inspection_id,
             [("front", str(local_path))],
         )
         ml_result = ml_service.validate_result(raw_result)
         inspection_service.apply_ml_result(db, inspection, ml_result)
+
     except ml_service.MLNotIntegratedError:
-        inspection.compliance_status = "PENDING_ML"
-        db.commit()
+        if inspection is not None:
+            inspection.compliance_status = "PENDING_ML"
+            db.commit()
     except Exception:
         db.rollback()
+        # Re-fetch after rollback — the session state is invalid after rollback
+        # so we need a fresh query.
         inspection = db.query(Inspection).filter(
             Inspection.inspection_id == inspection_id
         ).first()
@@ -53,7 +76,8 @@ def _process_scan_in_background(
             inspection.compliance_status = "FAILED"
             db.commit()
     finally:
-        local_path.unlink(missing_ok=True)
+        if local_path is not None:
+            local_path.unlink(missing_ok=True)
         db.close()
 
 
@@ -66,12 +90,18 @@ async def scan(
     user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    """Legacy single-image scan.
+
+    Accepts an image upload and optional product metadata, creates an
+    inspection record (side_count=1), stores the image, and queues ML
+    processing in the background.  Callers should poll
+    GET /api/inspections/{inspection_id} for the final compliance status.
+    """
     user_id = user["user_id"]
 
     declared_type = (image.content_type or "").lower().split(";")[0].strip()
 
-    # Read in bounded chunks so an oversized body is rejected before it is
-    # fully buffered into memory.
+    # Stream in bounded chunks — reject oversized images before fully buffering.
     data = bytearray()
     while True:
         chunk = await image.read(64 * 1024)
@@ -93,12 +123,18 @@ async def scan(
     storage_path = image_service.store_image(user_id, bytes(data), extension)
     image_url = image_service.public_url(storage_path)
 
-    inspection = inspection_service.create_inspection_for_scan(
-        db, user_id, product_name, product_category, image_url
+    # Create a 1-sided inspection so it shares the same status machine as
+    # multi-side inspections.
+    inspection = inspection_service.create_inspection_record(
+        db,
+        user_id,
+        product_name,
+        product_category,
+        image_url=image_url,
+        side_count=1,
     )
     inspection.compliance_status = "PENDING_ML"
     db.commit()
-    db.refresh(inspection)
 
     background_tasks.add_task(
         _process_scan_in_background,

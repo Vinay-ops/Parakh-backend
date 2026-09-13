@@ -131,7 +131,16 @@ def list_inspections(
 ) -> tuple[list[Inspection], int]:
     query = db.query(Inspection).filter(Inspection.user_id == user_id)
     if status:
-        query = query.filter(Inspection.compliance_status == status.upper())
+        status_upper = status.upper()
+        # Q2: Validate against known statuses so invalid values return 422
+        # rather than silently returning zero results.
+        from database.models import INSPECTION_STATUSES
+        if status_upper not in INSPECTION_STATUSES:
+            valid = ", ".join(sorted(INSPECTION_STATUSES))
+            raise ValueError(
+                f"Invalid status '{status}'. Valid values: {valid}"
+            )
+        query = query.filter(Inspection.compliance_status == status_upper)
     if category:
         query = query.filter(Inspection.product_category == category)
     if date_from:
@@ -156,8 +165,38 @@ def get_extracted_info(db: Session, inspection_id: str) -> ExtractedInformation 
     )
 
 
+
+# Q1: Explicit allow-list of fields that may be updated on ExtractedInformation.
+# Prevents accidental or malicious overwrite of system-managed columns (id,
+# inspection_id, created_at) even if callers bypass the Pydantic schema.
+_EXTRACTED_INFO_UPDATABLE_FIELDS = frozenset({
+    "common_product_name",
+    "manufacturer_name",
+    "manufacturer_address",
+    "packer_name",
+    "packer_address",
+    "importer_name",
+    "importer_address",
+    "multi_product_names",
+    "multi_product_quantities",
+    "net_quantity_value",
+    "net_quantity_unit",
+    "number_count",
+    "mrp",
+    "mrp_tax_wording",
+    "manufacture_or_import_date",
+    "consumer_care_name",
+    "consumer_care_address",
+    "consumer_care_phone",
+    "consumer_care_email",
+    "commodity_dimensions",
+})
+
+
 def update_extracted_info(db: Session, extracted: ExtractedInformation, values: dict) -> ExtractedInformation:
     for key, value in values.items():
+        if key not in _EXTRACTED_INFO_UPDATABLE_FIELDS:
+            raise ValueError(f"Field '{key}' is not an updatable field on ExtractedInformation")
         setattr(extracted, key, value)
     db.commit()
     db.refresh(extracted)

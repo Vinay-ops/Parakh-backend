@@ -103,8 +103,23 @@ def create_inspector_profile(
     return profile
 
 
+# Q1: Explicit allow-list for inspector profile updates.
+# System-managed columns (id, user_id, created_at) are never in this set.
+_INSPECTOR_UPDATABLE_FIELDS = frozenset({
+    "full_name",
+    "email",
+    "employee_id",
+    "department",
+    "phone",
+    "role",
+    "active",
+})
+
+
 def update_inspector_profile(db: Session, profile: Profile, updates: dict) -> Profile:
     for key, value in updates.items():
+        if key not in _INSPECTOR_UPDATABLE_FIELDS:
+            raise ValueError(f"Field '{key}' is not an updatable field on Profile")
         setattr(profile, key, value)
     db.commit()
     db.refresh(profile)
