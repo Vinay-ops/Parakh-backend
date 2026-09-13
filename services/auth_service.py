@@ -209,6 +209,31 @@ def sign_in_with_password(email: str, password: str) -> dict:
     except httpx.HTTPError as exc:
         raise InvalidCredentialsError("Authentication service unavailable") from exc
     if resp.status_code != 200:
+        # Log the real Supabase error so it appears in Render's log drain.
+        # Common causes:
+        #   400 — SUPABASE_ANON_KEY wrong/missing (Supabase rejects apikey header)
+        #   401 — email not found or password incorrect
+        #   422 — email not confirmed ("Email not confirmed" in error body)
+        try:
+            body = resp.json()
+            supabase_msg = (
+                body.get("error_description")
+                or body.get("msg")
+                or body.get("error")
+                or str(body)
+            )
+        except Exception:
+            supabase_msg = resp.text[:200]
+        logger.error(
+            "Supabase sign-in failed: status=%s supabase_error=%r supabase_url=%s",
+            resp.status_code,
+            supabase_msg,
+            SUPABASE_URL or "(not set)",
+        )
+        if "not confirmed" in supabase_msg.lower():
+            raise InvalidCredentialsError(
+                "Email not confirmed — ask an admin to confirm your account in Supabase"
+            )
         raise InvalidCredentialsError("Invalid email or password")
     return resp.json()
 

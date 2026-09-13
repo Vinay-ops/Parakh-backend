@@ -28,8 +28,8 @@ def login(request: Request, payload: LoginRequest):
     """
     try:
         result = auth_service.authenticate(payload.email, payload.password)
-    except auth_service.InvalidCredentialsError:
-        error("Invalid email or password", "INVALID_CREDENTIALS", 401)
+    except auth_service.InvalidCredentialsError as exc:
+        return error(str(exc), "INVALID_CREDENTIALS", 401)
     return ok(data=result, message="Login successful")
 
 
